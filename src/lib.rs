@@ -1,4 +1,4 @@
-//! Rust bindings for FBGEMM's optimized SGEMM (single-precision matrix multiply).
+//! Pure Rust SGEMM with SIMD micro-kernels ported from FBGEMM.
 //!
 //! Computes C = beta * C + A * B where A, B, C are f32 matrices in row-major order.
 //!
@@ -6,100 +6,12 @@
 //! The packed representation can be reused across multiple GEMM calls with
 //! different A matrices (e.g., different batch inputs against the same weights).
 
-use std::ptr::NonNull;
+pub mod gemm;
+pub mod kernels;
+pub mod pack;
+pub mod partition;
 
-mod ffi {
-    #[repr(C)]
-    pub struct FbgemmPackedMatrix {
-        _opaque: [u8; 0],
-    }
-
-    unsafe extern "C" {
-        pub fn fbgemm_packed_matrix_new(
-            trans: i32,
-            nrow: i32,
-            ncol: i32,
-            alpha: f32,
-            data: *const f32,
-        ) -> *mut FbgemmPackedMatrix;
-
-        pub fn fbgemm_packed_matrix_free(mat: *mut FbgemmPackedMatrix);
-
-        pub fn fbgemm_packed_matrix_nrow(mat: *const FbgemmPackedMatrix) -> i32;
-        pub fn fbgemm_packed_matrix_ncol(mat: *const FbgemmPackedMatrix) -> i32;
-
-        pub fn fbgemm_sgemm(
-            m: i32,
-            a: *const f32,
-            packed_b: *const FbgemmPackedMatrix,
-            beta: f32,
-            c: *mut f32,
-            num_threads: i32,
-        );
-    }
-}
-
-/// A pre-packed matrix B in FBGEMM's optimized blocked layout.
-///
-/// Create from a K×N row-major matrix. The packed form is reusable
-/// for repeated GEMM calls with different A matrices.
-pub struct PackedMatrix {
-    ptr: NonNull<ffi::FbgemmPackedMatrix>,
-}
-
-// PackedMatrix is read-only after creation, safe to share across threads.
-unsafe impl Send for PackedMatrix {}
-unsafe impl Sync for PackedMatrix {}
-
-impl PackedMatrix {
-    /// Pack a K×N row-major matrix.
-    ///
-    /// `data` must have length `k * n`.
-    pub fn new(k: usize, n: usize, data: &[f32]) -> Self {
-        assert_eq!(data.len(), k * n, "data length must be k * n");
-        let ptr = unsafe {
-            ffi::fbgemm_packed_matrix_new(0, k as i32, n as i32, 1.0, data.as_ptr())
-        };
-        let ptr = NonNull::new(ptr).expect("FBGEMM PackedMatrix allocation failed");
-        Self { ptr }
-    }
-
-    /// Pack a K×N matrix stored in column-major (transposed) order.
-    ///
-    /// `data` must have length `k * n`, stored as N×K row-major (i.e., K×N column-major).
-    pub fn from_transposed(k: usize, n: usize, data: &[f32]) -> Self {
-        assert_eq!(data.len(), k * n, "data length must be k * n");
-        let ptr = unsafe {
-            ffi::fbgemm_packed_matrix_new(1, k as i32, n as i32, 1.0, data.as_ptr())
-        };
-        let ptr = NonNull::new(ptr).expect("FBGEMM PackedMatrix allocation failed");
-        Self { ptr }
-    }
-
-    /// Pack with a scaling factor applied: packed = alpha * B.
-    pub fn with_alpha(k: usize, n: usize, data: &[f32], alpha: f32) -> Self {
-        assert_eq!(data.len(), k * n, "data length must be k * n");
-        let ptr = unsafe {
-            ffi::fbgemm_packed_matrix_new(0, k as i32, n as i32, alpha, data.as_ptr())
-        };
-        let ptr = NonNull::new(ptr).expect("FBGEMM PackedMatrix allocation failed");
-        Self { ptr }
-    }
-
-    pub fn k(&self) -> usize {
-        unsafe { ffi::fbgemm_packed_matrix_nrow(self.ptr.as_ptr()) as usize }
-    }
-
-    pub fn n(&self) -> usize {
-        unsafe { ffi::fbgemm_packed_matrix_ncol(self.ptr.as_ptr()) as usize }
-    }
-}
-
-impl Drop for PackedMatrix {
-    fn drop(&mut self) {
-        unsafe { ffi::fbgemm_packed_matrix_free(self.ptr.as_ptr()) }
-    }
-}
+pub use pack::PackedMatrix;
 
 /// Compute C = beta * C + A * B.
 ///
@@ -118,16 +30,7 @@ pub fn sgemm(m: usize, a: &[f32], packed_b: &PackedMatrix, beta: f32, c: &mut [f
     assert_eq!(a.len(), m * k, "a must have length m * k");
     assert_eq!(c.len(), m * n, "c must have length m * n");
 
-    unsafe {
-        ffi::fbgemm_sgemm(
-            m as i32,
-            a.as_ptr(),
-            packed_b.ptr.as_ptr(),
-            beta,
-            c.as_mut_ptr(),
-            1,
-        );
-    }
+    gemm::cblas_gemm_compute(m, a, packed_b, beta, c);
 }
 
 /// Compute C = A * B (overwriting C).
