@@ -2,7 +2,8 @@
 name = "fbgemm-rs"
 version = "0.2.0"
 edition = "2021"
-description = "Pure Rust SGEMM with SIMD micro-kernels ported from FBGEMM"
+description = "Pure Rust GEMM with SIMD micro-kernels ported from FBGEMM"
+license = "BSD-3-Clause"
 
 [dependencies]
 rayon = { version = "1", optional = true }
