@@ -14,6 +14,7 @@ mod avx2;
 mod neon;
 
 pub use pack::PackedBMatrixI8;
+pub use gemm::I8GemmScratch;
 
 /// Compute C_f32 = (A_f32 × B_i8) * b_scale using quantized arithmetic.
 ///
@@ -36,6 +37,16 @@ pub fn i8gemm_f32(m: usize, a: &[f32], packed_b: &PackedBMatrixI8, b_scale: f32,
     gemm::i8gemm_compute(m, a, packed_b, b_scale, c);
 }
 
+/// Like [`i8gemm_f32`] but reuses scratch buffers to avoid per-call allocation.
+pub fn i8gemm_f32_with_scratch(m: usize, a: &[f32], packed_b: &PackedBMatrixI8, b_scale: f32, c: &mut [f32], scratch: &mut I8GemmScratch) {
+    let k = packed_b.k();
+    let n = packed_b.n();
+    assert_eq!(a.len(), m * k, "a must have length m * k");
+    assert_eq!(c.len(), m * n, "c must have length m * n");
+
+    gemm::i8gemm_compute_with_scratch(m, a, packed_b, b_scale, c, scratch);
+}
+
 /// Parallel version of [`i8gemm_f32`] using rayon.
 ///
 /// M-blocks are dispatched across threads for each K-block.
@@ -47,6 +58,17 @@ pub fn i8gemm_f32_par(m: usize, a: &[f32], packed_b: &PackedBMatrixI8, b_scale: 
     assert_eq!(c.len(), m * n, "c must have length m * n");
 
     gemm::i8gemm_compute_par(m, a, packed_b, b_scale, c);
+}
+
+/// Like [`i8gemm_f32_par`] but reuses scratch buffers to avoid per-call allocation.
+#[cfg(feature = "rayon")]
+pub fn i8gemm_f32_par_with_scratch(m: usize, a: &[f32], packed_b: &PackedBMatrixI8, b_scale: f32, c: &mut [f32], scratch: &mut I8GemmScratch) {
+    let k = packed_b.k();
+    let n = packed_b.n();
+    assert_eq!(a.len(), m * k, "a must have length m * k");
+    assert_eq!(c.len(), m * n, "c must have length m * n");
+
+    gemm::i8gemm_compute_par_with_scratch(m, a, packed_b, b_scale, c, scratch);
 }
 
 #[cfg(test)]

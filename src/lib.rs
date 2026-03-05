@@ -12,9 +12,13 @@ pub mod quantized;
 
 pub use pack::PackedMatrix;
 pub use quantized::PackedBMatrixI8;
+pub use quantized::I8GemmScratch;
 pub use quantized::i8gemm_f32;
+pub use quantized::i8gemm_f32_with_scratch;
 #[cfg(feature = "rayon")]
 pub use quantized::i8gemm_f32_par;
+#[cfg(feature = "rayon")]
+pub use quantized::i8gemm_f32_par_with_scratch;
 
 /// Compute C = beta * C + A * B.
 ///

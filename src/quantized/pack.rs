@@ -95,6 +95,18 @@ impl PackedBMatrixI8 {
 /// Quantize float32 activations to uint8 with per-tensor affine quantization.
 /// Returns (quantized_data, scale, zero_point, row_offsets).
 pub fn quantize_a(src: &[f32], m: usize, k: usize) -> (Vec<u8>, f32, i32, Vec<i32>) {
+    let mut a_u8 = Vec::new();
+    let mut row_offsets = Vec::new();
+    let (scale, zero_point) = quantize_a_into(src, m, k, &mut a_u8, &mut row_offsets);
+    (a_u8, scale, zero_point, row_offsets)
+}
+
+/// Like [`quantize_a`] but reuses caller-provided buffers to avoid allocation.
+/// Returns (scale, zero_point).
+pub fn quantize_a_into(
+    src: &[f32], m: usize, k: usize,
+    a_u8: &mut Vec<u8>, row_offsets: &mut Vec<i32>,
+) -> (f32, i32) {
     assert_eq!(src.len(), m * k);
 
     let mut min_val = f32::MAX;
@@ -104,18 +116,18 @@ pub fn quantize_a(src: &[f32], m: usize, k: usize) -> (Vec<u8>, f32, i32, Vec<i3
         if v > max_val { max_val = v; }
     }
 
+    a_u8.resize(m * k, 0);
+    row_offsets.resize(m, 0);
+
     if max_val == min_val {
-        let a_u8 = vec![0u8; m * k];
-        let row_offsets = vec![0i32; m];
-        return (a_u8, 1.0, 0, row_offsets);
+        a_u8.fill(0);
+        row_offsets.fill(0);
+        return (1.0, 0);
     }
 
     let scale = (max_val - min_val) / 255.0;
     let inv_scale = 1.0 / scale;
     let zero_point = ((-min_val * inv_scale).round() as i32).clamp(0, 255);
-
-    let mut a_u8 = vec![0u8; m * k];
-    let mut row_offsets = vec![0i32; m];
 
     for i in 0..m {
         let mut row_sum = 0i32;
@@ -128,5 +140,5 @@ pub fn quantize_a(src: &[f32], m: usize, k: usize) -> (Vec<u8>, f32, i32, Vec<i3
         row_offsets[i] = row_sum;
     }
 
-    (a_u8, scale, zero_point, row_offsets)
+    (scale, zero_point)
 }

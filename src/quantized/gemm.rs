@@ -9,6 +9,21 @@ use super::neon;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
+/// Reusable scratch buffers for quantized GEMM.
+/// Create once and pass to [`i8gemm_compute_with_scratch`] /
+/// [`i8gemm_compute_par_with_scratch`] to avoid per-call allocation.
+pub struct I8GemmScratch {
+    a_u8: Vec<u8>,
+    row_offsets: Vec<i32>,
+    c_i32: Vec<i32>,
+}
+
+impl I8GemmScratch {
+    pub fn new() -> Self {
+        Self { a_u8: Vec::new(), row_offsets: Vec::new(), c_i32: Vec::new() }
+    }
+}
+
 /// Detect SIMD capability flags at runtime.
 struct SimdFlags {
     #[cfg(target_arch = "x86_64")]
@@ -55,20 +70,32 @@ pub fn i8gemm_compute(
     b_scale: f32,
     c_float: &mut [f32],
 ) {
+    i8gemm_compute_with_scratch(m, a_float, packed_b, b_scale, c_float, &mut I8GemmScratch::new());
+}
+
+/// Like [`i8gemm_compute`] but reuses caller-provided scratch buffers.
+pub fn i8gemm_compute_with_scratch(
+    m: usize,
+    a_float: &[f32],
+    packed_b: &PackedBMatrixI8,
+    b_scale: f32,
+    c_float: &mut [f32],
+    scratch: &mut I8GemmScratch,
+) {
     let k = packed_b.k();
     let n = packed_b.n();
 
-    let (a_u8, a_scale, a_zero_point, _row_offsets) = quantize_a(a_float, m, k);
-    let mut c_i32 = vec![0i32; m * n];
+    let (a_scale, a_zero_point) = quantize_a_into(a_float, m, k, &mut scratch.a_u8, &mut scratch.row_offsets);
+    scratch.c_i32.resize(m * n, 0);
+    scratch.c_i32.fill(0);
     let flags = SimdFlags::detect();
 
-    // Blocked GEMM (sequential M-blocks)
     for mb_start in (0..m).step_by(MCB) {
         let mc = std::cmp::min(MCB, m - mb_start);
-        process_m_block(mb_start, mc, &a_u8, k, n, packed_b, &mut c_i32, &flags);
+        process_m_block(mb_start, mc, &scratch.a_u8, k, n, packed_b, &mut scratch.c_i32, &flags);
     }
 
-    dequantize(m, n, &c_i32, c_float, a_scale, b_scale, flags.effective_zp(a_zero_point), packed_b.col_offsets());
+    dequantize(m, n, &scratch.c_i32, c_float, a_scale, b_scale, flags.effective_zp(a_zero_point), packed_b.col_offsets());
 }
 
 /// Parallel version of [`i8gemm_compute`] using rayon.
@@ -83,19 +110,30 @@ pub fn i8gemm_compute_par(
     b_scale: f32,
     c_float: &mut [f32],
 ) {
+    i8gemm_compute_par_with_scratch(m, a_float, packed_b, b_scale, c_float, &mut I8GemmScratch::new());
+}
+
+/// Like [`i8gemm_compute_par`] but reuses caller-provided scratch buffers.
+#[cfg(feature = "rayon")]
+pub fn i8gemm_compute_par_with_scratch(
+    m: usize,
+    a_float: &[f32],
+    packed_b: &PackedBMatrixI8,
+    b_scale: f32,
+    c_float: &mut [f32],
+    scratch: &mut I8GemmScratch,
+) {
     let k = packed_b.k();
     let n = packed_b.n();
 
-    let (a_u8, a_scale, a_zero_point, _row_offsets) = quantize_a(a_float, m, k);
-    let mut c_i32 = vec![0i32; m * n];
+    let (a_scale, a_zero_point) = quantize_a_into(a_float, m, k, &mut scratch.a_u8, &mut scratch.row_offsets);
+    scratch.c_i32.resize(m * n, 0);
+    scratch.c_i32.fill(0);
     let flags = SimdFlags::detect();
 
-    // Collect M-block start positions
     let mb_starts: Vec<usize> = (0..m).step_by(MCB).collect();
-    let c_ptr = c_i32.as_mut_ptr() as usize; // for Send
+    let c_ptr = scratch.c_i32.as_mut_ptr() as usize;
 
-    // K-blocks must be sequential (they accumulate), but M-blocks within each
-    // K-block can run in parallel since they write to disjoint rows.
     let num_k_blocks = packed_b.num_k_blocks();
     let num_n_blocks = packed_b.num_n_blocks();
 
@@ -109,14 +147,14 @@ pub fn i8gemm_compute_par(
             // SAFETY: each M-block writes to rows [mb_start..mb_start+mc] — disjoint.
             unsafe {
                 process_kb_block(
-                    mb_start, mc, kb, k_start, kc, &a_u8, k, n,
+                    mb_start, mc, kb, k_start, kc, &scratch.a_u8, k, n,
                     num_n_blocks, packed_b, c_ptr, &flags,
                 );
             }
         });
     }
 
-    dequantize(m, n, &c_i32, c_float, a_scale, b_scale, flags.effective_zp(a_zero_point), packed_b.col_offsets());
+    dequantize(m, n, &scratch.c_i32, c_float, a_scale, b_scale, flags.effective_zp(a_zero_point), packed_b.col_offsets());
 }
 
 /// Process one M-block across all K-blocks and N-blocks (sequential path).
