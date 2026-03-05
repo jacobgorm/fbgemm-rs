@@ -1,0 +1,12 @@
+[package]
+name = "fbgemm-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust bindings for FBGEMM's optimized single-precision GEMM (SGEMM)"
+
+[build-dependencies]
+cc = "1"
+cmake = "0.1"
+
+[dev-dependencies]
+approx = "0.5"
