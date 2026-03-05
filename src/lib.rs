@@ -1,17 +1,17 @@
-//! Pure Rust SGEMM with SIMD micro-kernels ported from FBGEMM.
+//! Pure Rust GEMM with SIMD micro-kernels ported from FBGEMM.
 //!
-//! Computes C = beta * C + A * B where A, B, C are f32 matrices in row-major order.
-//!
-//! Matrix B must be pre-packed using [`PackedMatrix`] for optimal performance.
-//! The packed representation can be reused across multiple GEMM calls with
-//! different A matrices (e.g., different batch inputs against the same weights).
+//! Provides two GEMM paths:
+//! - **FP32**: C = beta * C + A * B (f32 matrices, [`PackedMatrix`])
+//! - **Quantized**: C_f32 = A_f32 × B_i8 (uint8×int8→int32→f32, [`quantized::PackedBMatrixI8`])
 
 pub mod gemm;
 pub mod kernels;
 pub mod pack;
 pub mod partition;
+pub mod quantized;
 
 pub use pack::PackedMatrix;
+pub use quantized::PackedBMatrixI8;
 
 /// Compute C = beta * C + A * B.
 ///
