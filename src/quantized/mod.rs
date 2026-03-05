@@ -10,6 +10,9 @@ mod gemm;
 #[cfg(target_arch = "x86_64")]
 mod avx2;
 
+#[cfg(target_arch = "aarch64")]
+mod neon;
+
 pub use pack::PackedBMatrixI8;
 
 /// Compute C_f32 = (A_f32 × B_i8) * b_scale using quantized arithmetic.
@@ -31,6 +34,19 @@ pub fn i8gemm_f32(m: usize, a: &[f32], packed_b: &PackedBMatrixI8, b_scale: f32,
     assert_eq!(c.len(), m * n, "c must have length m * n");
 
     gemm::i8gemm_compute(m, a, packed_b, b_scale, c);
+}
+
+/// Parallel version of [`i8gemm_f32`] using rayon.
+///
+/// M-blocks are dispatched across threads for each K-block.
+#[cfg(feature = "rayon")]
+pub fn i8gemm_f32_par(m: usize, a: &[f32], packed_b: &PackedBMatrixI8, b_scale: f32, c: &mut [f32]) {
+    let k = packed_b.k();
+    let n = packed_b.n();
+    assert_eq!(a.len(), m * k, "a must have length m * k");
+    assert_eq!(c.len(), m * n, "c must have length m * n");
+
+    gemm::i8gemm_compute_par(m, a, packed_b, b_scale, c);
 }
 
 #[cfg(test)]
@@ -163,5 +179,48 @@ mod tests {
         assert_eq!(packed_b.k(), 4);
         assert_eq!(packed_b.n(), 3);
         assert_eq!(packed_b.col_offsets(), &[22, 26, 30]);
+    }
+
+    #[test]
+    fn test_i8gemm_all_fringe_sizes() {
+        // Exercise SIMD fringe kernels for mc=1..11 by testing m=1..25.
+        // N=8 (=NR) ensures the SIMD path is taken on AVX2.
+        let k = 32;
+        let n = 8;
+        let b_i8: Vec<i8> = (0..k * n)
+            .map(|i| (((i * 11 + 5) % 200) as i32 - 100) as i8)
+            .collect();
+        let b_scale = 0.05;
+        let packed_b = PackedBMatrixI8::new(k, n, &b_i8);
+
+        for m in 1..=25 {
+            let a_f32: Vec<f32> = (0..m * k)
+                .map(|i| ((i * 7 + 3) % 100) as f32 * 0.1 - 5.0)
+                .collect();
+            let mut c = vec![0.0f32; m * n];
+
+            i8gemm_f32(m, &a_f32, &packed_b, b_scale, &mut c);
+
+            // Compare against quantized naive reference
+            let (a_u8, a_scale, a_zp, _) = pack::quantize_a(&a_f32, m, k);
+            let col_offsets = packed_b.col_offsets();
+            let output_scale = a_scale * b_scale;
+
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0i32;
+                    for p in 0..k {
+                        acc += a_u8[i * k + p] as i32 * b_i8[p * n + j] as i32;
+                    }
+                    let adjusted = acc - a_zp * col_offsets[j];
+                    let expected = adjusted as f32 * output_scale;
+                    assert!(
+                        (c[i * n + j] - expected).abs() < 1e-4,
+                        "m={} mismatch at [{},{}]: got {}, expected {}",
+                        m, i, j, c[i * n + j], expected,
+                    );
+                }
+            }
+        }
     }
 }
