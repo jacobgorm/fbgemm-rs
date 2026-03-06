@@ -20,10 +20,6 @@ pub use quantized::I8GemmScratch;
 pub use quantized::i8gemm_f32;
 #[cfg(feature = "quantized")]
 pub use quantized::i8gemm_f32_with_scratch;
-#[cfg(all(feature = "quantized", feature = "rayon"))]
-pub use quantized::i8gemm_f32_par;
-#[cfg(all(feature = "quantized", feature = "rayon"))]
-pub use quantized::i8gemm_f32_par_with_scratch;
 
 /// Compute C = beta * C + A * B.
 ///
@@ -42,7 +38,10 @@ pub fn sgemm(m: usize, a: &[f32], packed_b: &PackedMatrix, beta: f32, c: &mut [f
     assert_eq!(a.len(), m * k, "a must have length m * k");
     assert_eq!(c.len(), m * n, "c must have length m * n");
 
-    gemm::cblas_gemm_compute(m, a, packed_b, beta, c);
+    #[cfg(feature = "rayon")]
+    { gemm::cblas_gemm_compute_par(m, a, packed_b, beta, c); }
+    #[cfg(not(feature = "rayon"))]
+    { gemm::cblas_gemm_compute(m, a, packed_b, beta, c); }
 }
 
 /// Compute C = A * B (overwriting C).
@@ -50,25 +49,6 @@ pub fn sgemm(m: usize, a: &[f32], packed_b: &PackedMatrix, beta: f32, c: &mut [f
 /// Convenience wrapper for `sgemm` with `beta = 0.0`.
 pub fn sgemm_simple(m: usize, a: &[f32], packed_b: &PackedMatrix, c: &mut [f32]) {
     sgemm(m, a, packed_b, 0.0, c);
-}
-
-/// Parallel version of [`sgemm`] using rayon.
-///
-/// Row groups are dispatched across threads for each K-block.
-#[cfg(feature = "rayon")]
-pub fn sgemm_par(m: usize, a: &[f32], packed_b: &PackedMatrix, beta: f32, c: &mut [f32]) {
-    let k = packed_b.k();
-    let n = packed_b.n();
-    assert_eq!(a.len(), m * k, "a must have length m * k");
-    assert_eq!(c.len(), m * n, "c must have length m * n");
-
-    gemm::cblas_gemm_compute_par(m, a, packed_b, beta, c);
-}
-
-/// Parallel version of [`sgemm_simple`] using rayon.
-#[cfg(feature = "rayon")]
-pub fn sgemm_simple_par(m: usize, a: &[f32], packed_b: &PackedMatrix, c: &mut [f32]) {
-    sgemm_par(m, a, packed_b, 0.0, c);
 }
 
 #[cfg(test)]

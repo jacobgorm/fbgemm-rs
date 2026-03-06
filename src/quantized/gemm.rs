@@ -63,6 +63,7 @@ impl SimdFlags {
 unsafe impl Sync for SimdFlags {}
 
 /// Main dispatcher for quantized GEMM: float32 activations × int8 weights → float32 output.
+#[cfg(not(feature = "rayon"))]
 pub fn i8gemm_compute(
     m: usize,
     a_float: &[f32],
@@ -74,6 +75,7 @@ pub fn i8gemm_compute(
 }
 
 /// Like [`i8gemm_compute`] but reuses caller-provided scratch buffers.
+#[cfg(not(feature = "rayon"))]
 pub fn i8gemm_compute_with_scratch(
     m: usize,
     a_float: &[f32],
@@ -158,6 +160,7 @@ pub fn i8gemm_compute_par_with_scratch(
 }
 
 /// Process one M-block across all K-blocks and N-blocks (sequential path).
+#[cfg(not(feature = "rayon"))]
 fn process_m_block(
     mb_start: usize,
     mc: usize,
