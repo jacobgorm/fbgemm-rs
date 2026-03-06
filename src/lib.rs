@@ -8,16 +8,21 @@ pub mod gemm;
 pub mod kernels;
 pub mod pack;
 pub mod partition;
+#[cfg(feature = "quantized")]
 pub mod quantized;
 
 pub use pack::PackedMatrix;
+#[cfg(feature = "quantized")]
 pub use quantized::PackedBMatrixI8;
+#[cfg(feature = "quantized")]
 pub use quantized::I8GemmScratch;
+#[cfg(feature = "quantized")]
 pub use quantized::i8gemm_f32;
+#[cfg(feature = "quantized")]
 pub use quantized::i8gemm_f32_with_scratch;
-#[cfg(feature = "rayon")]
+#[cfg(all(feature = "quantized", feature = "rayon"))]
 pub use quantized::i8gemm_f32_par;
-#[cfg(feature = "rayon")]
+#[cfg(all(feature = "quantized", feature = "rayon"))]
 pub use quantized::i8gemm_f32_par_with_scratch;
 
 /// Compute C = beta * C + A * B.

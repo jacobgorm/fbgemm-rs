@@ -9,4 +9,5 @@ license = "BSD-3-Clause"
 rayon = { version = "1", optional = true }
 
 [features]
+quantized = []
 rayon = ["dep:rayon"]
