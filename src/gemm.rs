@@ -49,6 +49,7 @@ unsafe fn process_row_group(
     kernel_nrows: usize,
     k_ind: usize,
     kb: usize,
+    #[cfg_attr(target_arch = "aarch64", allow(unused))]
     total_m: usize,
     beta_: f32,
     a: &[f32],
