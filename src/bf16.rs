@@ -268,8 +268,12 @@ unsafe fn process_row_group_inline(
     }
 }
 
-/// Returns true if we have native bf16 kernels (x86_64 with AVX2+FMA).
+/// Returns true if we have native bf16 kernels (inline bf16→f32 in micro-kernel).
 fn have_bf16_kernels() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        return true; // Neon bf16 kernels always available on aarch64
+    }
     #[cfg(target_arch = "x86_64")]
     {
         return is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
