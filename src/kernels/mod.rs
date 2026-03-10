@@ -67,6 +67,7 @@ pub fn get_bf16_kernels() -> &'static [Option<KernelFn>] {
     }
 
     // Fallback: use standard kernels (caller must pre-convert bf16→f32)
+    #[allow(unreachable_code)]
     &fallback::KERNELS
 }
 

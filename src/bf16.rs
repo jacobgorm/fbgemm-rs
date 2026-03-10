@@ -283,6 +283,7 @@ fn have_bf16_kernels() -> bool {
 }
 
 /// Compute C = beta * C + A * packed_B_bf16 (single-threaded).
+#[cfg(not(feature = "rayon"))]
 fn compute_st(
     m: usize,
     a: &[f32],
