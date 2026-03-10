@@ -4,6 +4,7 @@
 //! - **FP32**: C = beta * C + A * B (f32 matrices, [`PackedMatrix`])
 //! - **Quantized**: C_f32 = A_f32 × B_i8 (uint8×int8→int32→f32, [`quantized::PackedBMatrixI8`])
 
+pub mod bf16;
 pub mod gemm;
 pub mod kernels;
 pub mod pack;
@@ -12,6 +13,9 @@ pub mod partition;
 pub mod quantized;
 
 pub use pack::PackedMatrix;
+pub use bf16::PackedMatrixBf16;
+pub use bf16::sgemm_bf16;
+pub use bf16::sgemm_bf16_simple;
 #[cfg(feature = "quantized")]
 pub use quantized::PackedBMatrixI8;
 #[cfg(feature = "quantized")]

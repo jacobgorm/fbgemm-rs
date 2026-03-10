@@ -5,6 +5,8 @@ pub mod neon;
 
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2_bf16;
 
 use crate::pack::BLOCK_COL_SIZE;
 
@@ -44,6 +46,20 @@ pub fn get_kernels() -> &'static [Option<KernelFn>] {
         }
     }
 
+    &fallback::KERNELS
+}
+
+/// Returns the bf16 kernel table for the current platform.
+/// These kernels load B from bf16 (u16) packed format, converting inline to f32.
+pub fn get_bf16_kernels() -> &'static [Option<KernelFn>] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return &avx2_bf16::KERNELS;
+        }
+    }
+
+    // Fallback: use standard kernels (caller must pre-convert bf16→f32)
     &fallback::KERNELS
 }
 
