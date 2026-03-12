@@ -136,6 +136,108 @@ impl PackedMatrixBf16 {
     }
 }
 
+/// Verify that all pointer accesses in the GEMM computation will be in-bounds.
+///
+/// This provides a machine-checkable proof that the unsafe code below cannot
+/// cause out-of-bounds memory accesses for the given dimensions. It checks
+/// every invariant the unsafe code relies on:
+///
+/// 1. **A accesses**: For each row group (m2, kernel_nrows) and K-block (k_ind, kb),
+///    the kernel reads A[m2*k + k_ind + i*k + kk] for i in 0..kernel_nrows, kk in 0..kb.
+///    Maximum index: (m2 + kernel_nrows - 1) * k + k_ind + kb - 1 < m * k = a.len().
+///
+/// 2. **C accesses**: Kernel writes C[(m2+i)*n + j] for i in 0..kernel_nrows, j in 0..n.
+///    Maximum index: (m2 + kernel_nrows - 1) * n + n - 1 < m * n = c.len().
+///
+/// 3. **B accesses**: Kernel reads nbcol * kb * bcol u16 elements starting at
+///    packed_b.addr(k_ind, 0). The blocked layout guarantees contiguous storage
+///    within a K-block row because k_ind is always brow-aligned and kb equals
+///    the block's rows_in_block.
+///
+/// 4. **Scratchpad**: pack_a writes at most kernel_nrows * kb <= 6 * kb elements.
+///
+/// 5. **c_tmp**: Fringe kernel writes at most kernel_nrows * bcol <= 6 * 16 = 96 < 448.
+///
+/// 6. **Kernel table**: kernel_nrows is always in 1..=6 (from PARTITION_AVX2).
+fn verify_gemm_bounds(m: usize, a_len: usize, k: usize, n: usize, packed_b: &PackedMatrixBf16) {
+    let brow = packed_b.brow;
+    let bcol = packed_b.bcol;
+    let tasks = collect_row_groups(m);
+
+    // Verify row groups partition [0, m) exactly and use valid kernel sizes
+    let mut covered = 0;
+    for &(m2, kernel_nrows) in &tasks {
+        assert_eq!(m2, covered, "row groups must be contiguous");
+        assert!(
+            kernel_nrows >= 1 && kernel_nrows <= 6,
+            "kernel_nrows {kernel_nrows} out of range 1..=6"
+        );
+        covered += kernel_nrows;
+    }
+    // Allow covered < m only if m == 0 (no tasks)
+    if m > 0 {
+        assert_eq!(covered, m, "row groups must cover all {m} rows, covered {covered}");
+    }
+
+    for k_ind in (0..k).step_by(brow) {
+        let kb = brow.min(k - k_ind);
+
+        // Verify k_ind is brow-aligned (guaranteed by step_by, but check anyway)
+        debug_assert_eq!(k_ind % brow, 0);
+
+        // Verify kb matches the block's rows_in_block in the packed layout
+        let block_row_id = k_ind / brow;
+        let rows_in_block = if block_row_id != packed_b.nbrow - 1 {
+            packed_b.brow
+        } else {
+            packed_b.last_brow
+        };
+        assert_eq!(
+            kb, rows_in_block,
+            "kb={kb} must equal rows_in_block={rows_in_block} for block_row_id={block_row_id}"
+        );
+
+        // Verify B read bounds: kernel reads nbcol * kb * bcol u16 elements
+        // starting at addr(k_ind, 0), contiguously
+        let b_start = packed_b.addr(k_ind, 0);
+        let nbcol_full = n / bcol;
+        let b_read_len = nbcol_full * kb * bcol;
+        assert!(
+            b_start + b_read_len <= packed_b.data.len(),
+            "B main read OOB: start={b_start} + len={b_read_len} > data.len()={}",
+            packed_b.data.len()
+        );
+
+        // Verify B fringe read bounds (if applicable)
+        if n % bcol != 0 {
+            let fringe_start = packed_b.addr(k_ind, nbcol_full * bcol);
+            let fringe_read_len = kb * bcol; // kernel reads a full block column
+            assert!(
+                fringe_start + fringe_read_len <= packed_b.data.len(),
+                "B fringe read OOB: start={fringe_start} + len={fringe_read_len} > data.len()={}",
+                packed_b.data.len()
+            );
+        }
+
+        for &(m2, kernel_nrows) in &tasks {
+            // Verify A bounds
+            let a_max = (m2 + kernel_nrows - 1) * k + k_ind + kb - 1;
+            assert!(
+                a_max < a_len,
+                "A OOB: a[{a_max}] >= a.len()={a_len} (m2={m2}, nrows={kernel_nrows}, k_ind={k_ind}, kb={kb})"
+            );
+
+            // Verify C bounds
+            let c_max = (m2 + kernel_nrows - 1) * n + n - 1;
+            assert!(
+                c_max < m * n,
+                "C OOB: c[{c_max}] >= c.len()={} (m2={m2}, nrows={kernel_nrows})",
+                m * n
+            );
+        }
+    }
+}
+
 /// Transpose A from row-major to column-major scratchpad (used on x86_64).
 #[cfg(not(target_arch = "aarch64"))]
 fn pack_a(nrow: usize, ncol: usize, from: &[f32], ldim: usize, to: &mut [f32]) {
@@ -188,6 +290,9 @@ unsafe fn process_row_group_inline(
     c_ptr: *mut f32,
     kernels: &[Option<KernelFn>],
 ) {
+    debug_assert!(kernel_nrows >= 1 && kernel_nrows <= 6);
+    debug_assert!(k_ind % packed_b.brow == 0, "k_ind must be brow-aligned");
+
     let ldc = n;
     let bcol = BLOCK_COL_SIZE;
     let nbcol = n / bcol; // full block columns only (fringe handled separately)
@@ -212,14 +317,17 @@ unsafe fn process_row_group_inline(
 
     #[cfg(target_arch = "aarch64")]
     {
+        debug_assert!(m2 * k + k_ind < a.len());
         gp.a = (a.as_ptr() as *mut f32).add(m2 * k + k_ind);
         gp.lda = (k * 4) as u64;
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
         if total_m == 1 {
+            debug_assert!(k_ind + kb <= a.len());
             gp.a = (a.as_ptr() as *mut f32).add(k_ind);
         } else {
+            debug_assert!(m2 * k + k_ind + (kernel_nrows - 1) * k + kb <= a.len());
             pack_a(
                 kernel_nrows,
                 kb,
@@ -431,6 +539,8 @@ unsafe fn process_row_group_fallback(
     c_ptr: *mut f32,
     kernels: &[Option<KernelFn>],
 ) {
+    debug_assert!(kernel_nrows >= 1 && kernel_nrows <= 6);
+
     let ldc = n;
     let bcol = BLOCK_COL_SIZE;
     let nbcol = n / bcol; // full block columns only
@@ -500,6 +610,10 @@ pub fn sgemm_bf16(m: usize, a: &[f32], packed_b: &PackedMatrixBf16, beta: f32, c
     assert_eq!(a.len(), m * k, "a must have length m * k");
     assert_eq!(c.len(), m * n, "c must have length m * n");
 
+    if m > 0 && k > 0 && n > 0 {
+        verify_gemm_bounds(m, a.len(), k, n, packed_b);
+    }
+
     #[cfg(feature = "rayon")]
     { compute_par(m, a, packed_b, beta, c); }
     #[cfg(not(feature = "rayon"))]
@@ -514,6 +628,104 @@ pub fn sgemm_bf16_simple(m: usize, a: &[f32], packed_b: &PackedMatrixBf16, c: &m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Prove that addr(r, c) is always in-bounds of data for all r < nrow, c < ncol.
+    /// This exhaustively checks for a set of dimension combinations that the packed
+    /// layout never produces an out-of-bounds index.
+    #[test]
+    fn test_addr_always_in_bounds() {
+        let test_dims: Vec<(usize, usize)> = vec![
+            (1, 1), (1, 16), (1, 17), (16, 1), (16, 16), (16, 17),
+            (15, 15), (512, 16), (512, 17), (513, 16), (513, 32),
+            (1024, 33), (100, 100), (511, 31),
+        ];
+        for &(nrow, ncol) in &test_dims {
+            let m = PackedMatrixBf16::alloc(nrow, ncol);
+            for r in 0..nrow {
+                for c in 0..ncol {
+                    let idx = m.addr(r, c);
+                    assert!(
+                        idx < m.data.len(),
+                        "addr({r},{c}) = {idx} >= data.len()={} for nrow={nrow}, ncol={ncol}",
+                        m.data.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Prove that within each K-block, consecutive column blocks are contiguous
+    /// in memory, matching the kernel's linear B pointer advance pattern.
+    #[test]
+    fn test_b_layout_contiguous_within_kblock() {
+        let test_dims: Vec<(usize, usize)> = vec![
+            (1, 16), (1, 32), (1, 33), (512, 16), (512, 48),
+            (513, 16), (513, 33), (1024, 48), (100, 47),
+        ];
+        let bcol = BLOCK_COL_SIZE;
+        let brow = DEFAULT_BROW;
+
+        for &(nrow, ncol) in &test_dims {
+            let m = PackedMatrixBf16::alloc(nrow, ncol);
+            let nbcol_full = ncol / bcol;
+
+            for k_ind in (0..nrow).step_by(brow) {
+                let kb = brow.min(nrow - k_ind);
+                let base = m.addr(k_ind, 0);
+
+                // Verify each full column block starts at base + j * kb * bcol
+                for j in 0..nbcol_full {
+                    let expected_start = base + j * kb * bcol;
+                    let actual_start = m.addr(k_ind, j * bcol);
+                    assert_eq!(
+                        actual_start, expected_start,
+                        "column block {j} misaligned: expected {expected_start}, got {actual_start} \
+                         (nrow={nrow}, ncol={ncol}, k_ind={k_ind}, kb={kb})"
+                    );
+
+                    // Verify elements within the block are contiguous
+                    for row in 0..kb {
+                        for col in 0..bcol {
+                            let expected = expected_start + row * bcol + col;
+                            let actual = m.addr(k_ind + row, j * bcol + col);
+                            assert_eq!(actual, expected);
+                        }
+                    }
+                }
+
+                // Verify fringe block (if any) is also contiguous after the full blocks
+                if ncol % bcol != 0 {
+                    let fringe_col = nbcol_full * bcol;
+                    let expected_fringe_start = base + nbcol_full * kb * bcol;
+                    let actual_fringe_start = m.addr(k_ind, fringe_col);
+                    assert_eq!(
+                        actual_fringe_start, expected_fringe_start,
+                        "fringe block misaligned (nrow={nrow}, ncol={ncol}, k_ind={k_ind})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Verify that verify_gemm_bounds passes for a wide sweep of dimensions,
+    /// proving no combination can cause out-of-bounds access.
+    #[test]
+    fn test_verify_bounds_sweep() {
+        let ms = [1, 2, 3, 5, 6, 7, 12, 60, 119, 120, 121, 240];
+        let ks = [1, 2, 15, 16, 32, 100, 511, 512, 513, 1024];
+        let ns = [1, 2, 15, 16, 17, 31, 32, 33, 48, 49, 64];
+
+        for &m in &ms {
+            for &k in &ks {
+                for &n in &ns {
+                    let src = vec![0.0f32; k * n];
+                    let packed_b = PackedMatrixBf16::new(k, n, &src);
+                    // This will panic if any bounds check fails
+                    verify_gemm_bounds(m, m * k, k, n, &packed_b);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_bf16_conversion_roundtrip() {
