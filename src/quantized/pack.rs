@@ -165,3 +165,44 @@ pub fn quantize_a_into(
 
     (scale, zero_point)
 }
+
+/// Like [`quantize_a_into`] but skips row-offset computation.
+///
+/// The current float-output GEMM dequantization only needs the activation
+/// scale/zero-point and the precomputed weight column offsets.
+pub fn quantize_a_into_no_offsets(
+    src: &[f32],
+    m: usize,
+    k: usize,
+    a_u8: &mut Vec<u8>,
+) -> (f32, i32) {
+    assert_eq!(src.len(), m * k);
+
+    let mut min_val = f32::MAX;
+    let mut max_val = f32::MIN;
+    for &v in src {
+        if v < min_val {
+            min_val = v;
+        }
+        if v > max_val {
+            max_val = v;
+        }
+    }
+
+    a_u8.resize(m * k, 0);
+
+    if max_val == min_val {
+        a_u8.fill(0);
+        return (1.0, 0);
+    }
+
+    let scale = (max_val - min_val) / 255.0;
+    let inv_scale = scale.recip();
+    let zero_point = ((-min_val * inv_scale).round() as i32).clamp(0, 255);
+
+    for (dst, &value) in a_u8.iter_mut().zip(src.iter()) {
+        *dst = ((value * inv_scale).round() as i32 + zero_point).clamp(0, 255) as u8;
+    }
+
+    (scale, zero_point)
+}

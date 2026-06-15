@@ -16,7 +16,6 @@ use rayon::prelude::*;
 /// [`i8gemm_compute_par_with_scratch`] to avoid per-call allocation.
 pub struct I8GemmScratch {
     a_u8: Vec<u8>,
-    row_offsets: Vec<i32>,
     c_i32: Vec<i32>,
 }
 
@@ -24,7 +23,6 @@ impl I8GemmScratch {
     pub fn new() -> Self {
         Self {
             a_u8: Vec::new(),
-            row_offsets: Vec::new(),
             c_i32: Vec::new(),
         }
     }
@@ -115,8 +113,7 @@ pub fn i8gemm_compute_with_scratch(
     let k = packed_b.k();
     let n = packed_b.n();
 
-    let (a_scale, a_zero_point) =
-        quantize_a_into(a_float, m, k, &mut scratch.a_u8, &mut scratch.row_offsets);
+    let (a_scale, a_zero_point) = quantize_a_into_no_offsets(a_float, m, k, &mut scratch.a_u8);
     scratch.c_i32.resize(m * n, 0);
     scratch.c_i32.fill(0);
     let flags = SimdFlags::detect();
@@ -182,8 +179,7 @@ pub fn i8gemm_compute_par_with_scratch(
     let k = packed_b.k();
     let n = packed_b.n();
 
-    let (a_scale, a_zero_point) =
-        quantize_a_into(a_float, m, k, &mut scratch.a_u8, &mut scratch.row_offsets);
+    let (a_scale, a_zero_point) = quantize_a_into_no_offsets(a_float, m, k, &mut scratch.a_u8);
     scratch.c_i32.resize(m * n, 0);
     scratch.c_i32.fill(0);
     let flags = SimdFlags::detect();
@@ -193,15 +189,33 @@ pub fn i8gemm_compute_par_with_scratch(
 
     let num_k_blocks = packed_b.num_k_blocks();
     let num_n_blocks = packed_b.num_n_blocks();
+    let split_n_blocks = flags.use_simd() && n % NR == 0 && num_n_blocks > 1;
+    let n_chunks = if split_n_blocks {
+        rayon::current_num_threads().min(num_n_blocks)
+    } else {
+        1
+    };
+    let n_chunk_blocks = num_n_blocks.div_ceil(n_chunks);
 
     for kb in 0..num_k_blocks {
         let k_start = kb * KCB;
         let kc = std::cmp::min(KCB, k - k_start);
+        let tasks: Vec<_> = mb_starts
+            .iter()
+            .flat_map(|&mb_start| {
+                (0..num_n_blocks)
+                    .step_by(n_chunk_blocks)
+                    .map(move |nb_start| {
+                        let nb_end = (nb_start + n_chunk_blocks).min(num_n_blocks);
+                        (mb_start, nb_start, nb_end)
+                    })
+            })
+            .collect();
 
-        mb_starts.par_iter().for_each(|&mb_start| {
+        tasks.par_iter().for_each(|&(mb_start, nb_start, nb_end)| {
             let mc = std::cmp::min(MCB, m - mb_start);
             let c_ptr = c_ptr as *mut i32;
-            // SAFETY: each M-block writes to rows [mb_start..mb_start+mc] — disjoint.
+            // SAFETY: tasks write disjoint row/column tiles of C.
             unsafe {
                 process_kb_block(
                     mb_start,
@@ -212,7 +226,8 @@ pub fn i8gemm_compute_par_with_scratch(
                     &scratch.a_u8,
                     k,
                     n,
-                    num_n_blocks,
+                    nb_start,
+                    nb_end,
                     packed_b,
                     c_ptr,
                     &flags,
@@ -262,6 +277,7 @@ fn process_m_block(
                 a_u8,
                 k,
                 n,
+                0,
                 num_n_blocks,
                 packed_b,
                 c_i32.as_mut_ptr(),
@@ -285,7 +301,8 @@ unsafe fn process_kb_block(
     a_u8: &[u8],
     k: usize,
     n: usize,
-    num_n_blocks: usize,
+    nb_start: usize,
+    nb_end: usize,
     packed_b: &PackedBMatrixI8,
     c_ptr: *mut i32,
     flags: &SimdFlags,
@@ -299,7 +316,7 @@ unsafe fn process_kb_block(
         Vec::new()
     };
 
-    for nb in 0..num_n_blocks {
+    for nb in nb_start..nb_end {
         let n_start = nb * NR;
         let nc = std::cmp::min(NR, n - n_start);
         let b_tile = packed_b.tile(kb, nb);
