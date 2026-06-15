@@ -9,20 +9,15 @@ pub mod gemm;
 pub mod kernels;
 pub mod pack;
 pub mod partition;
-#[cfg(feature = "quantized")]
 pub mod quantized;
 
 pub use bf16::sgemm_bf16;
 pub use bf16::sgemm_bf16_simple;
 pub use bf16::PackedMatrixBf16;
 pub use pack::PackedMatrix;
-#[cfg(feature = "quantized")]
 pub use quantized::i8gemm_f32;
-#[cfg(feature = "quantized")]
 pub use quantized::i8gemm_f32_with_scratch;
-#[cfg(feature = "quantized")]
 pub use quantized::I8GemmScratch;
-#[cfg(feature = "quantized")]
 pub use quantized::PackedBMatrixI8;
 
 /// Compute C = beta * C + A * B.

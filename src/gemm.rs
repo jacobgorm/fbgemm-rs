@@ -1,11 +1,8 @@
-use crate::kernels::{get_kernels, GemmParams, KernelFn};
+use crate::kernels::{collect_row_groups, get_kernels, GemmParams, KernelFn};
 use crate::pack::{PackedMatrix, BLOCK_COL_SIZE};
-use crate::partition::PARTITION_AVX2;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
-
-const MB_MAX: usize = 120;
 
 /// Transpose A from row-major to column-major scratchpad (used on x86_64).
 /// to[r + c * nrow] = from[r * ldim + c]
@@ -16,28 +13,6 @@ fn pack_a(nrow: usize, ncol: usize, from: &[f32], ldim: usize, to: &mut [f32]) {
             to[r + c * nrow] = from[r * ldim + c];
         }
     }
-}
-
-/// Collect all (m2, kernel_nrows) row-group tasks for the given M range.
-fn collect_row_groups(m: usize) -> Vec<(usize, usize)> {
-    let mut tasks = Vec::new();
-    for m0 in (0..m).step_by(MB_MAX) {
-        let mb = MB_MAX.min(m - m0);
-        let partition = &PARTITION_AVX2[mb];
-        let mut m1 = m0;
-        for cycle in partition {
-            let kernel_nrows = cycle[0] as usize;
-            let nkernel_nrows = cycle[1] as usize;
-            if kernel_nrows == 0 {
-                break;
-            }
-            for _ in 0..nkernel_nrows {
-                tasks.push((m1, kernel_nrows));
-                m1 += kernel_nrows;
-            }
-        }
-    }
-    tasks
 }
 
 /// Process one row group: runs the micro-kernel for `kernel_nrows` rows starting at `m2`.
@@ -63,7 +38,7 @@ unsafe fn process_row_group(
     let nbcol = n / bcol;
 
     #[cfg(not(target_arch = "aarch64"))]
-    let mut scratchpad = vec![0.0f32; 6 * kb];
+    let mut scratchpad = vec![0.0f32; kernel_nrows * kb];
 
     let mut gp = GemmParams {
         k: kb as u64,
@@ -135,7 +110,7 @@ pub fn cblas_gemm_compute(m: usize, a: &[f32], packed_b: &PackedMatrix, beta: f3
     let n = packed_b.n();
     let brow = packed_b.block_row_size();
     let kernels = get_kernels();
-    let tasks = collect_row_groups(m);
+    let tasks = collect_row_groups(m, kernels);
     let c_ptr = c.as_mut_ptr();
 
     for k_ind in (0..k).step_by(brow) {
@@ -179,7 +154,7 @@ pub fn cblas_gemm_compute_par(
     let n = packed_b.n();
     let brow = packed_b.block_row_size();
     let kernels = get_kernels();
-    let tasks = collect_row_groups(m);
+    let tasks = collect_row_groups(m, kernels);
     let c_ptr = c.as_mut_ptr() as usize; // for Send
 
     for k_ind in (0..k).step_by(brow) {

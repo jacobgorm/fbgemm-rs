@@ -6,7 +6,7 @@ use core::arch::asm;
 // Note: on x86_64, A is pre-transposed (column-major via PackA), so A stride = kernel_nrows * 4 bytes
 
 #[inline(never)]
-unsafe fn avx2_kernel_1x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_kernel_1x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -96,7 +96,7 @@ unsafe fn avx2_kernel_1x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_kernel_2x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_kernel_2x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -187,7 +187,7 @@ unsafe fn avx2_kernel_2x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_kernel_3x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_kernel_3x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -298,7 +298,7 @@ unsafe fn avx2_kernel_3x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_kernel_4x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_kernel_4x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -428,7 +428,7 @@ unsafe fn avx2_kernel_4x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_kernel_5x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_kernel_5x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -578,7 +578,7 @@ unsafe fn avx2_kernel_5x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_kernel_6x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_kernel_6x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",

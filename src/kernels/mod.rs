@@ -7,6 +7,8 @@ pub mod neon;
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_bf16;
+#[cfg(target_arch = "x86_64")]
+pub mod avx512_256;
 #[cfg(target_arch = "aarch64")]
 pub mod neon_bf16;
 
@@ -30,6 +32,8 @@ pub struct GemmParams {
 /// A micro-kernel function pointer: takes GemmParams and processes `kernel_nrows` rows.
 pub type KernelFn = unsafe fn(*mut GemmParams);
 
+const MB_MAX: usize = 120;
+
 /// Returns the kernel table and partition table for the current platform.
 /// kernel_table[n] handles n rows (index 0 is unused).
 pub fn get_kernels() -> &'static [Option<KernelFn>] {
@@ -43,6 +47,12 @@ pub fn get_kernels() -> &'static [Option<KernelFn>] {
 
     #[cfg(target_arch = "x86_64")]
     {
+        if is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512vl")
+            && is_x86_feature_detected!("fma")
+        {
+            return &avx512_256::KERNELS;
+        }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return &avx2::KERNELS;
         }
@@ -69,6 +79,38 @@ pub fn get_bf16_kernels() -> &'static [Option<KernelFn>] {
     // Fallback: use standard kernels (caller must pre-convert bf16→f32)
     #[allow(unreachable_code)]
     &fallback::KERNELS
+}
+
+/// Highest row count directly supported by a kernel table.
+pub fn max_kernel_nrows(kernels: &[Option<KernelFn>]) -> usize {
+    kernels
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(nrows, kernel)| kernel.map(|_| nrows))
+        .expect("kernel table must contain at least one kernel")
+}
+
+/// Collect row-group tasks for the given M range using the largest available
+/// kernel at each step and smaller kernels for tails.
+pub fn collect_row_groups(m: usize, kernels: &[Option<KernelFn>]) -> Vec<(usize, usize)> {
+    let max_nrows = max_kernel_nrows(kernels);
+    let mut tasks = Vec::new();
+    for m0 in (0..m).step_by(MB_MAX) {
+        let mut m1 = m0;
+        let block_end = m0 + MB_MAX.min(m - m0);
+        while m1 < block_end {
+            let remaining = block_end - m1;
+            let mut kernel_nrows = max_nrows.min(remaining);
+            while kernel_nrows > 0 && kernels[kernel_nrows].is_none() {
+                kernel_nrows -= 1;
+            }
+            assert!(kernel_nrows > 0, "no kernel can cover row tail {remaining}");
+            tasks.push((m1, kernel_nrows));
+            m1 += kernel_nrows;
+        }
+    }
+    tasks
 }
 
 /// Reference kernel: pure Rust, no SIMD. Works on any platform.

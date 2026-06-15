@@ -10,7 +10,7 @@ use core::arch::asm;
 //           vpslld    ymm, ymm, 16             (shift left = bf16 mantissa alignment)
 
 #[inline(never)]
-unsafe fn avx2_bf16_kernel_1x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_bf16_kernel_1x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -109,7 +109,7 @@ unsafe fn avx2_bf16_kernel_1x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_bf16_kernel_2x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_bf16_kernel_2x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -207,7 +207,7 @@ unsafe fn avx2_bf16_kernel_2x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_bf16_kernel_3x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_bf16_kernel_3x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -325,7 +325,7 @@ unsafe fn avx2_bf16_kernel_3x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_bf16_kernel_4x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_bf16_kernel_4x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -462,7 +462,7 @@ unsafe fn avx2_bf16_kernel_4x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_bf16_kernel_5x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_bf16_kernel_5x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",
@@ -619,7 +619,7 @@ unsafe fn avx2_bf16_kernel_5x2(gp: *mut GemmParams) {
 }
 
 #[inline(never)]
-unsafe fn avx2_bf16_kernel_6x2(gp: *mut GemmParams) {
+pub(crate) unsafe fn avx2_bf16_kernel_6x2(gp: *mut GemmParams) {
     asm!(
         "push rbx",
         "mov r14, {gp}",

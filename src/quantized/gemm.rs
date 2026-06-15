@@ -2,6 +2,8 @@ use super::pack::*;
 
 #[cfg(target_arch = "x86_64")]
 use super::avx2;
+#[cfg(target_arch = "x86_64")]
+use super::avx512_vnni;
 
 #[cfg(target_arch = "aarch64")]
 use super::neon;
@@ -31,6 +33,8 @@ impl I8GemmScratch {
 /// Detect SIMD capability flags at runtime.
 struct SimdFlags {
     #[cfg(target_arch = "x86_64")]
+    avx512_vnni: bool,
+    #[cfg(target_arch = "x86_64")]
     avx2: bool,
     #[cfg(target_arch = "aarch64")]
     neon_dotprod: bool,
@@ -39,6 +43,11 @@ struct SimdFlags {
 impl SimdFlags {
     fn detect() -> Self {
         Self {
+            #[cfg(target_arch = "x86_64")]
+            avx512_vnni: is_x86_feature_detected!("avx512f")
+                && is_x86_feature_detected!("avx512bw")
+                && is_x86_feature_detected!("avx512vl")
+                && is_x86_feature_detected!("avx512vnni"),
             #[cfg(target_arch = "x86_64")]
             avx2: is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"),
             #[cfg(target_arch = "aarch64")]
@@ -49,7 +58,7 @@ impl SimdFlags {
     fn use_simd(&self) -> bool {
         #[cfg(target_arch = "x86_64")]
         {
-            self.avx2
+            self.avx512_vnni || self.avx2
         }
         #[cfg(target_arch = "aarch64")]
         {
@@ -299,6 +308,22 @@ unsafe fn process_kb_block(
         while row_offset < mc {
             let kernel_rows = std::cmp::min(MR, mc - row_offset);
             let i = mb_start + row_offset;
+
+            #[cfg(target_arch = "x86_64")]
+            if flags.avx512_vnni && nc == NR {
+                a_packed.fill(0);
+                avx2::pack_a_tile(a_u8, i, k_start, kernel_rows, kc, k, &mut a_packed);
+                avx512_vnni::dispatch_i8_kernel(
+                    kernel_rows,
+                    a_packed.as_ptr(),
+                    b_tile.as_ptr(),
+                    c_ptr.add(i * n + n_start),
+                    kc_aligned,
+                    n * 4,
+                );
+                row_offset += kernel_rows;
+                continue;
+            }
 
             #[cfg(target_arch = "x86_64")]
             if flags.avx2 && nc == NR {

@@ -8,16 +8,13 @@
 //!
 //! Halves weight memory and B-matrix cache pressure vs f32 packed GEMM.
 
-use crate::kernels::{GemmParams, KernelFn};
+use crate::kernels::{collect_row_groups, max_kernel_nrows, GemmParams, KernelFn};
 use crate::pack::BLOCK_COL_SIZE;
-use crate::partition::PARTITION_AVX2;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
 const DEFAULT_BROW: usize = 512;
-const MB_MAX: usize = 120;
-
 /// Convert f32 to bf16 by truncating (round-to-nearest-even could be added later).
 #[inline(always)]
 fn f32_to_bf16(x: f32) -> u16 {
@@ -154,23 +151,31 @@ impl PackedMatrixBf16 {
 ///    within a K-block row because k_ind is always brow-aligned and kb equals
 ///    the block's rows_in_block.
 ///
-/// 4. **Scratchpad**: pack_a writes at most kernel_nrows * kb <= 6 * kb elements.
+/// 4. **Scratchpad**: pack_a writes at most kernel_nrows * kb elements.
 ///
-/// 5. **c_tmp**: Fringe kernel writes at most kernel_nrows * bcol <= 6 * 16 = 96 < 448.
+/// 5. **c_tmp**: Fringe kernel writes at most kernel_nrows * bcol <= 14 * 16 = 224 < 448.
 ///
-/// 6. **Kernel table**: kernel_nrows is always in 1..=6 (from PARTITION_AVX2).
-fn verify_gemm_bounds(m: usize, a_len: usize, k: usize, n: usize, packed_b: &PackedMatrixBf16) {
+/// 6. **Kernel table**: kernel_nrows is always covered by the selected kernel table.
+fn verify_gemm_bounds(
+    m: usize,
+    a_len: usize,
+    k: usize,
+    n: usize,
+    packed_b: &PackedMatrixBf16,
+    kernels: &[Option<KernelFn>],
+) {
     let brow = packed_b.brow;
     let bcol = packed_b.bcol;
-    let tasks = collect_row_groups(m);
+    let tasks = collect_row_groups(m, kernels);
+    let max_nrows = max_kernel_nrows(kernels);
 
     // Verify row groups partition [0, m) exactly and use valid kernel sizes
     let mut covered = 0;
     for &(m2, kernel_nrows) in &tasks {
         assert_eq!(m2, covered, "row groups must be contiguous");
         assert!(
-            kernel_nrows >= 1 && kernel_nrows <= 6,
-            "kernel_nrows {kernel_nrows} out of range 1..=6"
+            kernel_nrows >= 1 && kernel_nrows <= max_nrows && kernels[kernel_nrows].is_some(),
+            "kernel_nrows {kernel_nrows} not covered by selected kernel table"
         );
         covered += kernel_nrows;
     }
@@ -251,27 +256,6 @@ fn pack_a(nrow: usize, ncol: usize, from: &[f32], ldim: usize, to: &mut [f32]) {
     }
 }
 
-fn collect_row_groups(m: usize) -> Vec<(usize, usize)> {
-    let mut tasks = Vec::new();
-    for m0 in (0..m).step_by(MB_MAX) {
-        let mb = MB_MAX.min(m - m0);
-        let partition = &PARTITION_AVX2[mb];
-        let mut m1 = m0;
-        for cycle in partition {
-            let kernel_nrows = cycle[0] as usize;
-            let nkernel_nrows = cycle[1] as usize;
-            if kernel_nrows == 0 {
-                break;
-            }
-            for _ in 0..nkernel_nrows {
-                tasks.push((m1, kernel_nrows));
-                m1 += kernel_nrows;
-            }
-        }
-    }
-    tasks
-}
-
 /// Process one row group using inline bf16 kernels.
 ///
 /// The bf16 kernel reads u16 values from the B pointer via vpmovzxwd,
@@ -292,7 +276,7 @@ unsafe fn process_row_group_inline(
     c_ptr: *mut f32,
     kernels: &[Option<KernelFn>],
 ) {
-    debug_assert!(kernel_nrows >= 1 && kernel_nrows <= 6);
+    debug_assert!(kernel_nrows >= 1 && kernel_nrows <= max_kernel_nrows(kernels));
     debug_assert!(k_ind % packed_b.brow == 0, "k_ind must be brow-aligned");
 
     let ldc = n;
@@ -300,7 +284,7 @@ unsafe fn process_row_group_inline(
     let nbcol = n / bcol; // full block columns only (fringe handled separately)
 
     #[cfg(not(target_arch = "aarch64"))]
-    let mut scratchpad = vec![0.0f32; 6 * kb];
+    let mut scratchpad = vec![0.0f32; kernel_nrows * kb];
 
     // B pointer: cast bf16 data to *const f32 — the bf16 kernel reads u16 via vpmovzxwd
     let b_ptr = packed_b.at_as_f32_ptr(k_ind, 0);
@@ -392,12 +376,12 @@ fn compute_st(m: usize, a: &[f32], packed_b: &PackedMatrixBf16, beta: f32, c: &m
     let k = packed_b.k();
     let n = packed_b.n();
     let brow = packed_b.block_row_size();
-    let tasks = collect_row_groups(m);
     let c_ptr = c.as_mut_ptr();
 
     if have_bf16_kernels() {
         // Inline bf16 kernels: read bf16 data directly, no scratch buffer
         let kernels = crate::kernels::get_bf16_kernels();
+        let tasks = collect_row_groups(m, kernels);
         for k_ind in (0..k).step_by(brow) {
             let beta_ = if k_ind == 0 { beta } else { 1.0 };
             let kb = brow.min(k - k_ind);
@@ -423,6 +407,7 @@ fn compute_st(m: usize, a: &[f32], packed_b: &PackedMatrixBf16, beta: f32, c: &m
     } else {
         // Fallback: convert bf16→f32 per K-block strip, use standard f32 kernels
         let kernels = crate::kernels::get_kernels();
+        let tasks = collect_row_groups(m, kernels);
         let bcol = BLOCK_COL_SIZE;
         let nbcol = packed_b.nbcol;
         for k_ind in (0..k).step_by(brow) {
@@ -471,11 +456,11 @@ fn compute_par(m: usize, a: &[f32], packed_b: &PackedMatrixBf16, beta: f32, c: &
     let k = packed_b.k();
     let n = packed_b.n();
     let brow = packed_b.block_row_size();
-    let tasks = collect_row_groups(m);
     let c_ptr = c.as_mut_ptr() as usize;
 
     if have_bf16_kernels() {
         let kernels = crate::kernels::get_bf16_kernels();
+        let tasks = collect_row_groups(m, kernels);
         let packed_ptr = packed_b as *const PackedMatrixBf16 as usize;
         for k_ind in (0..k).step_by(brow) {
             let beta_ = if k_ind == 0 { beta } else { 1.0 };
@@ -503,6 +488,7 @@ fn compute_par(m: usize, a: &[f32], packed_b: &PackedMatrixBf16, beta: f32, c: &
         }
     } else {
         let kernels = crate::kernels::get_kernels();
+        let tasks = collect_row_groups(m, kernels);
         let bcol = BLOCK_COL_SIZE;
         let nbcol = packed_b.nbcol;
         for k_ind in (0..k).step_by(brow) {
@@ -562,14 +548,14 @@ unsafe fn process_row_group_fallback(
     c_ptr: *mut f32,
     kernels: &[Option<KernelFn>],
 ) {
-    debug_assert!(kernel_nrows >= 1 && kernel_nrows <= 6);
+    debug_assert!(kernel_nrows >= 1 && kernel_nrows <= max_kernel_nrows(kernels));
 
     let ldc = n;
     let bcol = BLOCK_COL_SIZE;
     let nbcol = n / bcol; // full block columns only
 
     #[cfg(not(target_arch = "aarch64"))]
-    let mut scratchpad = vec![0.0f32; 6 * kb];
+    let mut scratchpad = vec![0.0f32; kernel_nrows * kb];
 
     let mut gp = GemmParams {
         k: kb as u64,
@@ -638,7 +624,12 @@ pub fn sgemm_bf16(m: usize, a: &[f32], packed_b: &PackedMatrixBf16, beta: f32, c
     assert_eq!(c.len(), m * n, "c must have length m * n");
 
     if m > 0 && k > 0 && n > 0 {
-        verify_gemm_bounds(m, a.len(), k, n, packed_b);
+        let kernels = if have_bf16_kernels() {
+            crate::kernels::get_bf16_kernels()
+        } else {
+            crate::kernels::get_kernels()
+        };
+        verify_gemm_bounds(m, a.len(), k, n, packed_b, kernels);
     }
 
     #[cfg(feature = "rayon")]
@@ -770,7 +761,14 @@ mod tests {
                     let src = vec![0.0f32; k * n];
                     let packed_b = PackedMatrixBf16::new(k, n, &src);
                     // This will panic if any bounds check fails
-                    verify_gemm_bounds(m, m * k, k, n, &packed_b);
+                    verify_gemm_bounds(
+                        m,
+                        m * k,
+                        k,
+                        n,
+                        &packed_b,
+                        crate::kernels::get_bf16_kernels(),
+                    );
                 }
             }
         }
