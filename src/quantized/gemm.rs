@@ -16,6 +16,8 @@ use rayon::prelude::*;
 /// [`i8gemm_compute_par_with_scratch`] to avoid per-call allocation.
 pub struct I8GemmScratch {
     a_u8: Vec<u8>,
+    a_scales: Vec<f32>,
+    a_zero_points: Vec<i32>,
     c_i32: Vec<i32>,
 }
 
@@ -23,6 +25,8 @@ impl I8GemmScratch {
     pub fn new() -> Self {
         Self {
             a_u8: Vec::new(),
+            a_scales: Vec::new(),
+            a_zero_points: Vec::new(),
             c_i32: Vec::new(),
         }
     }
@@ -113,7 +117,14 @@ pub fn i8gemm_compute_with_scratch(
     let k = packed_b.k();
     let n = packed_b.n();
 
-    let (a_scale, a_zero_point) = quantize_a_into_no_offsets(a_float, m, k, &mut scratch.a_u8);
+    quantize_a_per_row_into_no_offsets(
+        a_float,
+        m,
+        k,
+        &mut scratch.a_u8,
+        &mut scratch.a_scales,
+        &mut scratch.a_zero_points,
+    );
     scratch.c_i32.resize(m * n, 0);
     scratch.c_i32.fill(0);
     let flags = SimdFlags::detect();
@@ -132,15 +143,16 @@ pub fn i8gemm_compute_with_scratch(
         );
     }
 
-    dequantize(
+    dequantize_per_row(
         m,
         n,
         &scratch.c_i32,
         c_float,
-        a_scale,
+        &scratch.a_scales,
         b_scale,
-        flags.effective_zp(a_zero_point),
+        &scratch.a_zero_points,
         packed_b.col_offsets(),
+        &flags,
     );
 }
 
@@ -179,7 +191,14 @@ pub fn i8gemm_compute_par_with_scratch(
     let k = packed_b.k();
     let n = packed_b.n();
 
-    let (a_scale, a_zero_point) = quantize_a_into_no_offsets(a_float, m, k, &mut scratch.a_u8);
+    quantize_a_per_row_into_no_offsets(
+        a_float,
+        m,
+        k,
+        &mut scratch.a_u8,
+        &mut scratch.a_scales,
+        &mut scratch.a_zero_points,
+    );
     scratch.c_i32.resize(m * n, 0);
     scratch.c_i32.fill(0);
     let flags = SimdFlags::detect();
@@ -236,15 +255,16 @@ pub fn i8gemm_compute_par_with_scratch(
         });
     }
 
-    dequantize(
+    dequantize_per_row(
         m,
         n,
         &scratch.c_i32,
         c_float,
-        a_scale,
+        &scratch.a_scales,
         b_scale,
-        flags.effective_zp(a_zero_point),
+        &scratch.a_zero_points,
         packed_b.col_offsets(),
+        &flags,
     );
 }
 
@@ -414,18 +434,22 @@ unsafe fn process_kb_block(
 }
 
 /// Dequantize int32 accumulation buffer to float32 output.
-fn dequantize(
+fn dequantize_per_row(
     m: usize,
     n: usize,
     c_i32: &[i32],
     c_float: &mut [f32],
-    a_scale: f32,
+    a_scales: &[f32],
     b_scale: f32,
-    effective_zp: i32,
+    a_zero_points: &[i32],
     col_offsets: &[i32],
+    flags: &SimdFlags,
 ) {
-    let output_scale = a_scale * b_scale;
+    debug_assert_eq!(a_scales.len(), m);
+    debug_assert_eq!(a_zero_points.len(), m);
     for i in 0..m {
+        let output_scale = a_scales[i] * b_scale;
+        let effective_zp = flags.effective_zp(a_zero_points[i]);
         for j in 0..n {
             let raw = c_i32[i * n + j];
             let adjusted = raw - effective_zp * col_offsets[j];

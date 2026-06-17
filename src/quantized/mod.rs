@@ -1,7 +1,7 @@
 //! UINT8×INT8→INT32 quantized GEMM with float32 output.
 //!
 //! Weights (int8) are pre-packed once via [`PackedBMatrixI8`].
-//! Activations (float32) are dynamically quantized to uint8 per call.
+//! Activations (float32) are dynamically quantized to uint8 per row.
 //! Output is dequantized back to float32.
 
 mod gemm;
@@ -28,7 +28,7 @@ pub use pack::PackedBMatrixI8;
 /// - `c`: M×N row-major float32 output (overwritten)
 ///
 /// Internally:
-/// 1. Dynamically quantizes A from float32 to uint8
+/// 1. Dynamically quantizes each A row from float32 to uint8
 /// 2. Computes uint8 × int8 → int32 GEMM
 /// 3. Dequantizes int32 → float32 output
 pub fn i8gemm_f32(m: usize, a: &[f32], packed_b: &PackedBMatrixI8, b_scale: f32, c: &mut [f32]) {
@@ -102,6 +102,25 @@ mod tests {
         }
     }
 
+    fn quantize_a_per_row_for_test(
+        a_f32: &[f32],
+        m: usize,
+        k: usize,
+    ) -> (Vec<u8>, Vec<f32>, Vec<i32>) {
+        let mut a_u8 = Vec::new();
+        let mut a_scales = Vec::new();
+        let mut a_zero_points = Vec::new();
+        pack::quantize_a_per_row_into_no_offsets(
+            a_f32,
+            m,
+            k,
+            &mut a_u8,
+            &mut a_scales,
+            &mut a_zero_points,
+        );
+        (a_u8, a_scales, a_zero_points)
+    }
+
     #[test]
     fn test_i8gemm_matches_quantized_naive() {
         // Tests packing/dispatch correctness by comparing against naive
@@ -124,9 +143,8 @@ mod tests {
         i8gemm_f32(m, &a_f32, &packed_b, b_scale, &mut c);
 
         // Quantize A the same way, then do naive uint8×int8 matmul
-        let (a_u8, a_scale, a_zp, _) = pack::quantize_a(&a_f32, m, k);
+        let (a_u8, a_scales, a_zps) = quantize_a_per_row_for_test(&a_f32, m, k);
         let col_offsets = packed_b.col_offsets();
-        let output_scale = a_scale * b_scale;
 
         let mut c_ref = vec![0.0f32; m * n];
         for i in 0..m {
@@ -135,7 +153,8 @@ mod tests {
                 for p in 0..k {
                     acc += a_u8[i * k + p] as i32 * b_i8[p * n + j] as i32;
                 }
-                let adjusted = acc - a_zp * col_offsets[j];
+                let adjusted = acc - a_zps[i] * col_offsets[j];
+                let output_scale = a_scales[i] * b_scale;
                 c_ref[i * n + j] = adjusted as f32 * output_scale;
             }
         }
@@ -172,9 +191,8 @@ mod tests {
         i8gemm_f32(m, &a_f32, &packed_b, b_scale, &mut c);
 
         // Quantize A the same way, then do naive uint8×int8 matmul
-        let (a_u8, a_scale, a_zp, _) = pack::quantize_a(&a_f32, m, k);
+        let (a_u8, a_scales, a_zps) = quantize_a_per_row_for_test(&a_f32, m, k);
         let col_offsets = packed_b.col_offsets();
-        let output_scale = a_scale * b_scale;
 
         let mut c_ref = vec![0.0f32; m * n];
         for i in 0..m {
@@ -183,7 +201,8 @@ mod tests {
                 for p in 0..k {
                     acc += a_u8[i * k + p] as i32 * b_i8[p * n + j] as i32;
                 }
-                let adjusted = acc - a_zp * col_offsets[j];
+                let adjusted = acc - a_zps[i] * col_offsets[j];
+                let output_scale = a_scales[i] * b_scale;
                 c_ref[i * n + j] = adjusted as f32 * output_scale;
             }
         }
@@ -234,9 +253,8 @@ mod tests {
             i8gemm_f32(m, &a_f32, &packed_b, b_scale, &mut c);
 
             // Compare against quantized naive reference
-            let (a_u8, a_scale, a_zp, _) = pack::quantize_a(&a_f32, m, k);
+            let (a_u8, a_scales, a_zps) = quantize_a_per_row_for_test(&a_f32, m, k);
             let col_offsets = packed_b.col_offsets();
-            let output_scale = a_scale * b_scale;
 
             for i in 0..m {
                 for j in 0..n {
@@ -244,7 +262,8 @@ mod tests {
                     for p in 0..k {
                         acc += a_u8[i * k + p] as i32 * b_i8[p * n + j] as i32;
                     }
-                    let adjusted = acc - a_zp * col_offsets[j];
+                    let adjusted = acc - a_zps[i] * col_offsets[j];
+                    let output_scale = a_scales[i] * b_scale;
                     let expected = adjusted as f32 * output_scale;
                     assert!(
                         (c[i * n + j] - expected).abs() < 1e-4,

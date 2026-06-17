@@ -206,3 +206,54 @@ pub fn quantize_a_into_no_offsets(
 
     (scale, zero_point)
 }
+
+/// Like [`quantize_a_into_no_offsets`] but computes an affine scale and
+/// zero-point independently for each activation row.
+pub fn quantize_a_per_row_into_no_offsets(
+    src: &[f32],
+    m: usize,
+    k: usize,
+    a_u8: &mut Vec<u8>,
+    a_scales: &mut Vec<f32>,
+    a_zero_points: &mut Vec<i32>,
+) {
+    assert_eq!(src.len(), m * k);
+
+    a_u8.resize(m * k, 0);
+    a_scales.resize(m, 1.0);
+    a_zero_points.resize(m, 0);
+
+    for i in 0..m {
+        let row = &src[i * k..(i + 1) * k];
+        let mut min_val = f32::INFINITY;
+        let mut max_val = f32::NEG_INFINITY;
+        for &v in row {
+            if v < min_val {
+                min_val = v;
+            }
+            if v > max_val {
+                max_val = v;
+            }
+        }
+        min_val = min_val.min(0.0);
+        max_val = max_val.max(0.0);
+
+        let dst_row = &mut a_u8[i * k..(i + 1) * k];
+        if max_val == min_val {
+            dst_row.fill(0);
+            a_scales[i] = 1.0;
+            a_zero_points[i] = 0;
+            continue;
+        }
+
+        let scale = (max_val - min_val) / 255.0;
+        let inv_scale = scale.recip();
+        let zero_point = ((-min_val * inv_scale).round() as i32).clamp(0, 255);
+        a_scales[i] = scale;
+        a_zero_points[i] = zero_point;
+
+        for (dst, &value) in dst_row.iter_mut().zip(row) {
+            *dst = ((value * inv_scale).round() as i32 + zero_point).clamp(0, 255) as u8;
+        }
+    }
+}
